@@ -1,0 +1,194 @@
+const asyncHandler = require('express-async-handler')
+const User = require('../models/User')
+const Restaurant = require('../models/Restaurant')
+const Membership = require('../models/Membership')
+const {
+  generateAccessToken,
+  generateRefreshToken,
+  revokeRefreshToken,
+  revokeAllUserTokens,
+  verifyRefreshToken,
+} = require('../utils/tokens')
+const { normalizePhone } = require('../utils/phoneUtils')
+
+const slugify = (text) => text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
+
+const findRestaurant = async (input) => {
+  if (!input?.trim()) return null
+  const q = input.trim()
+  const slug = slugify(q)
+  return Restaurant.findOne({
+    $or: [
+      { slug },
+      { name: { $regex: new RegExp(`^${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+      ...(q.match(/^[a-f0-9]{24}$/i) ? [{ _id: q }] : []),
+    ],
+    status: { $in: ['active', 'pending'] },
+  })
+}
+
+const STAFF_DB_ROLES = ['staff', 'manager', 'waiter', 'chef', 'cashier', 'custom']
+const { pickMembership } = require('../utils/membershipPick')
+const { assertRestaurantNotSuspended } = require('../utils/restaurantAccess')
+const { canAccessAsAdmin, canAccessAsStaff, PROVISION } = require('../utils/provisionAccess')
+
+const mapMembershipToClientRole = (user, membership) => {
+  if (user.platformRole === 'superadmin') return 'superadmin'
+  if (!membership) return 'user'
+  if (membership.role === 'customer') return 'user'
+  if (membership.role === 'restaurant_admin') return 'admin'
+  if (STAFF_DB_ROLES.includes(membership.role)) return 'staff'
+  return 'user'
+}
+
+const normalizeRole = (role) => {
+  if (role === 'admin') return 'restaurant_admin'
+  if (role === 'user') return 'customer'
+  return role
+}
+
+const buildAuthResponse = async (user, membership = null, res, status = 200, membershipsOverride = null) => {
+  const payload = {
+    id: user._id,
+    platformRole: user.platformRole,
+    membershipId: membership?._id,
+    restaurantId: membership?.restaurant?._id || membership?.restaurant,
+    staffRole: membership?.role,
+  }
+
+  const accessToken = generateAccessToken(payload)
+  const refreshToken = await generateRefreshToken(user._id, {
+    userAgent: res.req?.headers['user-agent'],
+    ip: res.req?.ip,
+  })
+
+  const allMemberships = membershipsOverride || await Membership.find({ user: user._id, isActive: true })
+    .populate('restaurant', 'name slug status subscription settings createdBy')
+
+  const memberships = user.platformRole === 'superadmin'
+    ? allMemberships
+    : membership
+      ? [membership]
+      : allMemberships
+
+  const { password, ...safeUser } = user.toObject()
+
+  res.status(status).json({
+    success: true,
+    accessToken,
+    refreshToken,
+    user: {
+      ...safeUser,
+      role: mapMembershipToClientRole(user, membership),
+      platformRole: user.platformRole,
+      avatar: user.initials || safeUser.avatar,
+      restaurant: membership?.restaurant,
+      permissions: membership?.permissions || [],
+    },
+    memberships,
+  })
+}
+
+exports.login = asyncHandler(async (req, res) => {
+  res.status(403)
+  throw new Error('Password login is disabled. Sign in with WhatsApp OTP using your registered mobile number.')
+})
+
+exports.register = asyncHandler(async (req, res) => {
+  res.status(403)
+  throw new Error('Sign up with WhatsApp OTP using your mobile number.')
+})
+
+exports.refresh = asyncHandler(async (req, res) => {
+  const { refreshToken } = req.body
+  if (!refreshToken) {
+    res.status(400)
+    throw new Error('Refresh token required')
+  }
+
+  const doc = await verifyRefreshToken(refreshToken)
+  if (!doc) {
+    res.status(401)
+    throw new Error('Invalid refresh token')
+  }
+
+  const user = doc.user
+  let membership = null
+  if (req.body.membershipId) {
+    membership = await Membership.findById(req.body.membershipId).populate('restaurant')
+  }
+
+  await revokeRefreshToken(refreshToken)
+  await buildAuthResponse(user, membership, res)
+})
+
+exports.getMe = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id)
+  const memberships = await Membership.find({ user: user._id, isActive: true })
+    .populate('restaurant', 'name slug status subscription settings')
+
+  const { password, ...safeUser } = user.toObject()
+  res.json({
+    success: true,
+    user: {
+      ...safeUser,
+      role: mapMembershipToClientRole(req.user, req.membership),
+      permissions: req.membership?.permissions || [],
+    },
+    memberships,
+    activeMembership: req.membership,
+  })
+})
+
+exports.logout = asyncHandler(async (req, res) => {
+  const { refreshToken } = req.body
+  if (refreshToken) await revokeRefreshToken(refreshToken)
+  res.json({ success: true, message: 'Logged out' })
+})
+
+exports.switchRestaurant = asyncHandler(async (req, res) => {
+  const { restaurantId } = req.body
+  const membership = await Membership.findOne({
+    user: req.user._id,
+    restaurant: restaurantId,
+    isActive: true,
+  }).populate('restaurant')
+
+  if (!membership && req.user.platformRole !== 'superadmin') {
+    res.status(403)
+    throw new Error('Access denied to this restaurant')
+  }
+
+  if (membership) {
+    assertRestaurantNotSuspended(membership.restaurant, res)
+  }
+
+  await buildAuthResponse(req.user, membership, res)
+})
+
+exports.impersonate = asyncHandler(async (req, res) => {
+  if (req.user.platformRole !== 'superadmin') {
+    res.status(403)
+    throw new Error('Super admin only')
+  }
+
+  const restaurant = await Restaurant.findById(req.params.restaurantId)
+  if (!restaurant) {
+    res.status(404)
+    throw new Error('Restaurant not found')
+  }
+
+  const membership = await Membership.findOne({
+    restaurant: restaurant._id,
+    role: 'restaurant_admin',
+    isActive: true,
+  }).populate('restaurant')
+
+  res.json({
+    success: true,
+    restaurant,
+    impersonation: true,
+    accessPath: `/restaurant/${restaurant._id}/admin`,
+    membership,
+  })
+})

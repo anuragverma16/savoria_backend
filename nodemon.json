@@ -1,0 +1,6 @@
+{
+  "delay": 3000,
+  "signal": "SIGTERM",
+  "watch": ["server.js", "routes", "controllers", "models", "middleware", "config", "utils"],
+  "ignore": ["scripts/**", "node_modules/**", ".env", ".env.example", "nodemon.json"]
+}
