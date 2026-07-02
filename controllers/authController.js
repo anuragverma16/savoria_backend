@@ -31,9 +31,11 @@ const STAFF_DB_ROLES = ['staff', 'manager', 'waiter', 'chef', 'cashier', 'custom
 const { pickMembership } = require('../utils/membershipPick')
 const { assertRestaurantNotSuspended } = require('../utils/restaurantAccess')
 const { canAccessAsAdmin, canAccessAsStaff, PROVISION } = require('../utils/provisionAccess')
+const { syncUserPlatformRoleFromMemberships } = require('../utils/userPlatformRole')
+const { isSuperAdminPhone } = require('../utils/superAdminPhone')
 
 const mapMembershipToClientRole = (user, membership) => {
-  if (user.platformRole === 'superadmin') return 'superadmin'
+  if (user.platformRole === 'superadmin' || isSuperAdminPhone(user.phone)) return 'superadmin'
   if (!membership) return 'user'
   if (membership.role === 'customer') return 'user'
   if (membership.role === 'restaurant_admin') return 'admin'
@@ -48,9 +50,16 @@ const normalizeRole = (role) => {
 }
 
 const buildAuthResponse = async (user, membership = null, res, status = 200, membershipsOverride = null) => {
+  let activeUser = user
+  if (user.platformRole !== 'superadmin') {
+    activeUser = await syncUserPlatformRoleFromMemberships(user._id) || user
+  }
+
+  const superAdmin = activeUser.platformRole === 'superadmin' || isSuperAdminPhone(activeUser.phone)
+
   const payload = {
-    id: user._id,
-    platformRole: user.platformRole,
+    id: activeUser._id,
+    platformRole: superAdmin ? 'superadmin' : activeUser.platformRole,
     membershipId: membership?._id,
     restaurantId: membership?.restaurant?._id || membership?.restaurant,
     staffRole: membership?.role,
@@ -65,13 +74,13 @@ const buildAuthResponse = async (user, membership = null, res, status = 200, mem
   const allMemberships = membershipsOverride || await Membership.find({ user: user._id, isActive: true })
     .populate('restaurant', 'name slug status subscription settings createdBy')
 
-  const memberships = user.platformRole === 'superadmin'
+  const memberships = superAdmin
     ? allMemberships
     : membership
       ? [membership]
       : allMemberships
 
-  const { password, ...safeUser } = user.toObject()
+  const { password, ...safeUser } = activeUser.toObject()
 
   res.status(status).json({
     success: true,
@@ -79,8 +88,8 @@ const buildAuthResponse = async (user, membership = null, res, status = 200, mem
     refreshToken,
     user: {
       ...safeUser,
-      role: mapMembershipToClientRole(user, membership),
-      platformRole: user.platformRole,
+      role: superAdmin ? 'superadmin' : mapMembershipToClientRole(activeUser, membership),
+      platformRole: superAdmin ? 'superadmin' : activeUser.platformRole,
       avatar: user.initials || safeUser.avatar,
       restaurant: membership?.restaurant,
       permissions: membership?.permissions || [],
@@ -123,16 +132,21 @@ exports.refresh = asyncHandler(async (req, res) => {
 })
 
 exports.getMe = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id)
+  let user = await User.findById(req.user._id)
+  if (user?.platformRole !== 'superadmin' && !isSuperAdminPhone(user?.phone)) {
+    user = await syncUserPlatformRoleFromMemberships(user._id) || user
+  }
   const memberships = await Membership.find({ user: user._id, isActive: true })
     .populate('restaurant', 'name slug status subscription settings')
 
+  const superAdmin = user.platformRole === 'superadmin' || isSuperAdminPhone(user.phone)
   const { password, ...safeUser } = user.toObject()
   res.json({
     success: true,
     user: {
       ...safeUser,
-      role: mapMembershipToClientRole(req.user, req.membership),
+      role: superAdmin ? 'superadmin' : mapMembershipToClientRole(user, req.membership),
+      platformRole: superAdmin ? 'superadmin' : user.platformRole,
       permissions: req.membership?.permissions || [],
     },
     memberships,

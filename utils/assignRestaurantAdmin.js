@@ -1,8 +1,8 @@
 const User = require('../models/User')
 const Membership = require('../models/Membership')
-const { normalizePhone } = require('./phoneUtils')
 const { PROVISION } = require('./provisionAccess')
-const { setUserPlatformRole } = require('./userPlatformRole')
+const { syncUserPlatformRoleFromMemberships } = require('./userPlatformRole')
+const { resolveProvisionUser } = require('./provisionUserValidation')
 
 async function assignRestaurantAdmin({ restaurantId, name, email, password, phone }) {
   if (!name?.trim() || !email?.trim()) {
@@ -11,51 +11,20 @@ async function assignRestaurantAdmin({ restaurantId, name, email, password, phon
     throw err
   }
 
-  const normalizedEmail = String(email).toLowerCase().trim()
-  const normalizedPhone = phone ? normalizePhone(phone) : null
-  if (!normalizedPhone) {
-    const err = new Error('Valid phone number is required')
-    err.statusCode = 400
-    throw err
-  }
+  const user = await resolveProvisionUser({
+    email,
+    phone,
+    name,
+    password,
+    platformRole: 'admin',
+  })
 
-  let user = await User.findOne({ email: normalizedEmail })
-
-  if (user?.platformRole === 'superadmin') {
-    const err = new Error('Cannot assign a super admin as restaurant admin')
-    err.statusCode = 400
-    throw err
-  }
-
-  const existingMembership = user
-    ? await Membership.findOne({ user: user._id, restaurant: restaurantId })
-    : null
+  const existingMembership = await Membership.findOne({ user: user._id, restaurant: restaurantId })
 
   if (existingMembership?.isActive && existingMembership.role === 'restaurant_admin') {
     const err = new Error('This user is already an admin for this restaurant')
     err.statusCode = 400
     throw err
-  }
-
-  if (!user) {
-    if (!password || String(password).length < 6) {
-      const err = new Error('Password or verified email code is required for new admin')
-      err.statusCode = 400
-      throw err
-    }
-    user = await User.create({
-      name: name.trim(),
-      email: normalizedEmail,
-      password,
-      phone: normalizedPhone,
-      platformRole: 'admin',
-    })
-  } else {
-    if (name?.trim()) user.name = name.trim()
-    user.phone = normalizedPhone
-    if (password && String(password).length >= 6) user.password = password
-    await user.save()
-    await setUserPlatformRole(user, 'admin')
   }
 
   let membership = existingMembership
@@ -73,9 +42,11 @@ async function assignRestaurantAdmin({ restaurantId, name, email, password, phon
     })
   }
 
-  await membership.populate('user', 'name email phone isActive platformRole')
+  await membership.populate('user', 'name email phone isActive')
 
-  return { user: await User.findById(user._id), membership }
+  const syncedUser = await syncUserPlatformRoleFromMemberships(user._id)
+
+  return { user: syncedUser || user, membership }
 }
 
 module.exports = { assignRestaurantAdmin }

@@ -14,6 +14,7 @@ const { recordLogin } = require('../utils/loginHistory')
 const Membership = require('../models/Membership')
 const Restaurant = require('../models/Restaurant')
 const { PROVISION } = require('../utils/provisionAccess')
+const { syncUserPlatformRoleFromMemberships } = require('../utils/userPlatformRole')
 const STAFF_DB_ROLES = ['staff', 'manager', 'waiter', 'chef', 'cashier', 'custom']
 
 function mapMembershipToClientRole(user, membership) {
@@ -27,12 +28,16 @@ function mapMembershipToClientRole(user, membership) {
 
 async function buildWhatsappAuthResponse(user, membership, res, status = 200, loginMeta = {}) {
   const superAdmin = user.platformRole === 'superadmin' || isSuperAdminPhone(user.phone)
+  let activeUser = user
+  if (!superAdmin) {
+    activeUser = await syncUserPlatformRoleFromMemberships(user._id) || user
+  }
   const clientRole = superAdmin
     ? 'superadmin'
-    : mapMembershipToClientRole(user, membership)
+    : mapMembershipToClientRole(activeUser, membership)
 
   await recordLogin({
-    userId: user._id,
+    userId: activeUser._id,
     method: 'whatsapp_otp',
     loginRole: loginMeta.loginRole || clientRole,
     restaurantId: membership?.restaurant?._id || membership?.restaurant,
@@ -41,8 +46,8 @@ async function buildWhatsappAuthResponse(user, membership, res, status = 200, lo
   })
 
   const payload = {
-    id: user._id,
-    platformRole: superAdmin ? 'superadmin' : user.platformRole,
+    id: activeUser._id,
+    platformRole: superAdmin ? 'superadmin' : activeUser.platformRole,
     membershipId: membership?._id,
     restaurantId: membership?.restaurant?._id || membership?.restaurant,
     staffRole: membership?.role,
@@ -57,21 +62,21 @@ async function buildWhatsappAuthResponse(user, membership, res, status = 200, lo
   const memberships = await Membership.find({ user: user._id, isActive: true })
     .populate('restaurant', 'name slug status subscription settings createdBy')
 
-  const { password, ...safeUser } = user.toObject()
+  const { password, ...safeUser } = activeUser.toObject()
 
   res.status(status).json({
     success: true,
     accessToken,
     refreshToken,
-    isSuperAdmin: user.platformRole === 'superadmin' || isSuperAdminPhone(user.phone),
+    isSuperAdmin: activeUser.platformRole === 'superadmin' || isSuperAdminPhone(activeUser.phone),
     user: {
       ...safeUser,
-      role: user.platformRole === 'superadmin' || isSuperAdminPhone(user.phone)
+      role: activeUser.platformRole === 'superadmin' || isSuperAdminPhone(activeUser.phone)
         ? 'superadmin'
-        : mapMembershipToClientRole(user, membership),
-      platformRole: user.platformRole === 'superadmin' || isSuperAdminPhone(user.phone)
+        : mapMembershipToClientRole(activeUser, membership),
+      platformRole: activeUser.platformRole === 'superadmin' || isSuperAdminPhone(activeUser.phone)
         ? 'superadmin'
-        : user.platformRole,
+        : activeUser.platformRole,
       avatar: user.initials || safeUser.avatar,
       restaurant: membership?.restaurant,
       permissions: membership?.permissions || [],
@@ -141,7 +146,7 @@ exports.sendWhatsappOtp = asyncHandler(async (req, res) => {
     } else if (loginRole === 'admin' || loginRole === 'staff') {
       const user = await findUserByPhone(normalizedPhone, User)
       if (!user) {
-        throw authError('This number is not registered. Ask your super admin to add you.', 404)
+        throw authError('This number is not registered. Ask your super admin to add you from the platform panel.', 404)
       }
       if (!user.isActive) {
         throw authError('Account deactivated', 403)
@@ -153,15 +158,15 @@ exports.sendWhatsappOtp = asyncHandler(async (req, res) => {
       if (!hasAccess) {
         throw authError(
           loginRole === 'admin'
-            ? 'No admin access for this number. Contact your super admin.'
-            : 'No staff access for this number. Contact your super admin.',
+            ? 'No admin access for this number. Ask your super admin to add you from the platform panel.'
+            : 'No staff access for this number. Ask your super admin to add you from the platform panel.',
           403,
         )
       }
     } else {
       const user = await findUserByPhone(normalizedPhone, User)
       if (!user) {
-        throw authError('This number is not registered. Please sign up first.', 404)
+        throw authError('This mobile number is not registered. Please sign up first.', 404)
       }
       if (!user.isActive) {
         throw authError('Account deactivated', 403)
@@ -173,7 +178,7 @@ exports.sendWhatsappOtp = asyncHandler(async (req, res) => {
     }
     const exists = await findUserByPhone(normalizedPhone, User)
     if (exists) {
-      throw authError('This number is already registered. Please log in.', 400)
+      throw authError('This mobile number is already registered. Please log in instead.', 400)
     }
   }
 
@@ -206,7 +211,7 @@ exports.verifyWhatsappOtp = asyncHandler(async (req, res) => {
     }
     const exists = await findUserByPhone(normalizedPhone, User)
     if (exists) {
-      throw authError('This number is already registered. Please log in.', 400)
+      throw authError('This mobile number is already registered. Please log in instead.', 400)
     }
     const { user, membership } = await findOrCreatePhoneCustomer(normalizedPhone, { name, restaurantName, email })
     await buildWhatsappAuthResponse(user, membership, res, 201)
@@ -329,7 +334,9 @@ exports.verifyEmailSignup = asyncHandler(async (req, res) => {
   })
   await membership.populate('restaurant')
 
-  await buildWhatsappAuthResponse(user, membership, res, 201)
+  const syncedUser = await syncUserPlatformRoleFromMemberships(user._id)
+
+  await buildWhatsappAuthResponse(syncedUser || user, membership, res, 201)
 })
 
 exports.verifyEmailLogin = asyncHandler(async (req, res) => {

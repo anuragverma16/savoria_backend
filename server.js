@@ -10,7 +10,6 @@ setTwilioWhatsAppConfig({
   contentSid: process.env.TWILIO_CONTENT_SID,
   otpVariableKey: process.env.TWILIO_OTP_VARIABLE_KEY || '1',
 })
-
 const EMAIL_OTP = {
   gmail: '',
   appPassword: '',
@@ -41,17 +40,17 @@ const publicRoutes = require('./routes/publicRoutes')
 const restaurantRoutes = require('./routes/restaurantRoutes')
 
 connectDB().then(async () => {
-  if (process.env.NODE_ENV !== 'production') {
-    try {
+  try {
+    if (process.env.NODE_ENV !== 'production') {
       await ensureSuperAdmin()
       await syncPlatformRestaurants()
-      const roleSync = await syncAllUserPlatformRoles()
-      if (roleSync > 0) {
-        console.log(`✅ Synced platformRole for ${roleSync} user(s)`)
-      }
-    } catch (err) {
-      console.warn('⚠️ Could not ensure Super Admin user:', err.message)
     }
+    const synced = await syncAllUserPlatformRoles()
+    if (synced > 0 && process.env.NODE_ENV === 'development') {
+      console.log(`✅ Synced platformRole for ${synced} user(s)`)
+    }
+  } catch (err) {
+    console.warn('⚠️ Startup sync warning:', err.message)
   }
 })
 

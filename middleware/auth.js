@@ -3,11 +3,12 @@ const User = require('../models/User')
 const Membership = require('../models/Membership')
 const Restaurant = require('../models/Restaurant')
 const { assertRestaurantNotSuspended } = require('../utils/restaurantAccess')
+const { isSuperAdminPhone } = require('../utils/superAdminPhone')
 
 const STAFF_CLIENT_ROLES = ['staff', 'manager', 'waiter', 'chef', 'cashier', 'custom']
 
 function resolveClientRole(user, membership) {
-  if (user?.platformRole === 'superadmin') return 'superadmin'
+  if (user?.platformRole === 'superadmin' || isSuperAdminPhone(user?.phone)) return 'superadmin'
   if (!membership) return 'user'
   if (membership.role === 'customer') return 'user'
   if (membership.role === 'restaurant_admin') return 'admin'
@@ -50,7 +51,8 @@ const authorize = (...roles) => (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({ success: false, message: 'Not authenticated' })
   }
-  if (req.user.platformRole === 'superadmin') {
+  const isSuperAdminUser = req.user.platformRole === 'superadmin' || isSuperAdminPhone(req.user.phone)
+  if (isSuperAdminUser) {
     if (!roles.length || roles.includes('superadmin')) return next()
   }
   const role = resolveClientRole(req.user, req.membership)
@@ -65,7 +67,8 @@ const authorizePlatform = (...roles) => (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({ success: false, message: 'Not authenticated' })
   }
-  if (!roles.includes(req.user.platformRole)) {
+  const isSuperAdminUser = req.user.platformRole === 'superadmin' || isSuperAdminPhone(req.user.phone)
+  if (!roles.includes(req.user.platformRole) && !(roles.includes('superadmin') && isSuperAdminUser)) {
     return res.status(403).json({ success: false, message: 'Platform access denied' })
   }
   next()
@@ -75,7 +78,7 @@ const authorizeMembership = (...roles) => (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({ success: false, message: 'Not authenticated' })
   }
-  if (req.user.platformRole === 'superadmin') return next()
+  if (req.user.platformRole === 'superadmin' || isSuperAdminPhone(req.user.phone)) return next()
   if (!req.membership || !req.membership.isActive) {
     return res.status(403).json({ success: false, message: 'No restaurant access' })
   }
@@ -89,7 +92,7 @@ const requirePermission = (...perms) => (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({ success: false, message: 'Not authenticated' })
   }
-  if (req.user.platformRole === 'superadmin') return next()
+  if (req.user.platformRole === 'superadmin' || isSuperAdminPhone(req.user.phone)) return next()
   if (req.membership?.role === 'restaurant_admin') return next()
   if (!req.membership) {
     return res.status(403).json({ success: false, message: 'Permission denied' })
@@ -109,7 +112,7 @@ const resolveTenant = async (req, res, next) => {
       return next()
     }
 
-    if (req.user?.platformRole === 'superadmin') {
+    if (req.user?.platformRole === 'superadmin' || isSuperAdminPhone(req.user?.phone)) {
       const owned = await Restaurant.findOne({
         _id: restaurantId,
         createdBy: req.user._id,
@@ -129,7 +132,7 @@ const resolveTenant = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Restaurant not found' })
     }
 
-    if (req.user?.platformRole !== 'superadmin') {
+    if (req.user?.platformRole !== 'superadmin' && !isSuperAdminPhone(req.user?.phone)) {
       try {
         assertRestaurantNotSuspended(req.restaurant)
       } catch (err) {

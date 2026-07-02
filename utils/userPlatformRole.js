@@ -42,16 +42,11 @@ async function syncUserPlatformRoleFromMemberships(userId) {
 }
 
 async function syncAllUserPlatformRoles() {
-  const users = await User.find({ platformRole: { $ne: 'superadmin' } })
+  const users = await User.find({ platformRole: { $ne: 'superadmin' } }).select('_id')
   let updated = 0
-  for (const user of users) {
-    const memberships = await Membership.find({ user: user._id, isActive: true })
-    const nextRole = resolvePlatformRoleFromMemberships(memberships)
-    if (user.platformRole !== nextRole) {
-      user.platformRole = nextRole
-      await user.save({ validateBeforeSave: false })
-      updated += 1
-    }
+  for (const { _id } of users) {
+    const user = await syncUserPlatformRoleFromMemberships(_id)
+    if (user?.platformRole) updated += 1
   }
   return updated
 }

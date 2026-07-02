@@ -8,6 +8,7 @@ const {
   getPlatformUsers,
   getPlatformLoginHistory,
   getRestaurantCustomerDashboard,
+  sendProvisionWhatsAppOtp,
 } = require('../controllers/platformController')
 const {
   listContacts, updateContactStatus, deleteContact,
@@ -25,6 +26,7 @@ router.get('/users', getPlatformUsers)
 router.get('/login-history', getPlatformLoginHistory)
 router.get('/restaurants/:id/customer-dashboard', getRestaurantCustomerDashboard)
 router.post('/provision/email-otp', sendProvisionEmailOtp)
+router.post('/provision/whatsapp-otp', sendProvisionWhatsAppOtp)
 router.get('/restaurants', getRestaurants)
 router.post('/restaurants', createRestaurant)
 router.get('/restaurants/:id/admins', getRestaurantAdmins)

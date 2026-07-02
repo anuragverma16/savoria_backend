@@ -12,11 +12,24 @@ const { assignRestaurantStaff } = require('../utils/assignRestaurantStaff')
 const { PROVISION } = require('../utils/provisionAccess')
 const { sendEmailOtp, normalizeEmail } = require('../utils/emailOtpService')
 const { resolvePlatformProvision } = require('../utils/provisionCredentials')
+const { sendOtp, verifyOtp } = require('../utils/otpService')
+const { assertProvisionPhone } = require('../utils/provisionUserValidation')
 const { read: readIdempotent, write: writeIdempotent, idempotencyKey } = require('../utils/idempotency')
+const { aggregateRestaurantUserCounts, deactivateOrphanMemberships, EMPTY_COUNTS } = require('../utils/restaurantUserCounts')
 const LoginHistory = require('../models/LoginHistory')
 
 function escapeRegex(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+async function assertProvisionPhoneVerified(phone, otpCode) {
+  const code = String(otpCode || '').trim()
+  if (!/^\d{6}$/.test(code)) {
+    const err = new Error('Enter the 6-digit WhatsApp verification code')
+    err.statusCode = 400
+    throw err
+  }
+  await verifyOtp(phone, code, {}, { channel: 'whatsapp' })
 }
 
 const slugify = (text) => text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
@@ -152,44 +165,25 @@ exports.getRestaurants = asyncHandler(async (req, res) => {
     .limit(Number(limit))
 
   const restaurantIds = restaurants.map((r) => r._id)
-  const userCountRows = restaurantIds.length
-    ? await Membership.aggregate([
-        {
-          $match: {
-            restaurant: { $in: restaurantIds },
-            isActive: true,
-            $or: [
-              { role: 'customer' },
-              { provisionedBy: PROVISION.PLATFORM },
-              { role: 'restaurant_admin', provisionedBy: { $exists: false } },
-            ],
-          },
-        },
-        { $group: { _id: { restaurant: '$restaurant', role: '$role' }, count: { $sum: 1 } } },
-      ])
-    : []
+  await deactivateOrphanMemberships(restaurantIds)
+  const userCountsByRestaurant = await aggregateRestaurantUserCounts(restaurantIds)
 
-  const userCountsByRestaurant = {}
-  for (const row of userCountRows) {
-    const rid = String(row._id.restaurant)
-    if (!userCountsByRestaurant[rid]) {
-      userCountsByRestaurant[rid] = { admins: 0, staff: 0, customers: 0, teamTotal: 0 }
+  const restaurantsWithUsers = restaurants.map((r) => {
+    const counts = userCountsByRestaurant[String(r._id)] || { ...EMPTY_COUNTS }
+    const hasAdmin = counts.admins > 0
+    const hasStaff = counts.staff > 0
+    const hasCustomer = counts.customers > 0
+
+    return {
+      ...r.toObject(),
+      userCounts: counts,
+      provisionHints: {
+        needsAdmin: !hasAdmin,
+        needsStaff: !hasStaff,
+        hasCustomer,
+      },
     }
-    const role = row._id.role
-    const count = row.count
-    if (role === 'restaurant_admin') userCountsByRestaurant[rid].admins += count
-    else if (role === 'customer') userCountsByRestaurant[rid].customers += count
-    else userCountsByRestaurant[rid].staff += count
-  }
-
-  for (const counts of Object.values(userCountsByRestaurant)) {
-    counts.teamTotal = counts.admins + counts.staff
-  }
-
-  const restaurantsWithUsers = restaurants.map((r) => ({
-    ...r.toObject(),
-    userCounts: userCountsByRestaurant[String(r._id)] || { admins: 0, staff: 0, customers: 0, teamTotal: 0 },
-  }))
+  })
 
   res.json({ success: true, total, page: Number(page), restaurants: restaurantsWithUsers })
 })
@@ -204,6 +198,26 @@ exports.sendProvisionEmailOtp = asyncHandler(async (req, res) => {
 
   try {
     const result = await sendEmailOtp(normalizedEmail)
+    res.json({ success: true, ...result })
+  } catch (err) {
+    if (err.statusCode === 429 && err.resendIn) {
+      return res.status(429).json({
+        success: false,
+        message: err.message,
+        resendIn: err.resendIn,
+      })
+    }
+    if (err.statusCode) res.status(err.statusCode)
+    throw err
+  }
+})
+
+exports.sendProvisionWhatsAppOtp = asyncHandler(async (req, res) => {
+  const { phone } = req.body
+  assertProvisionPhone(phone)
+
+  try {
+    const result = await sendOtp(phone, { channel: 'whatsapp' })
     res.json({ success: true, ...result })
   } catch (err) {
     if (err.statusCode === 429 && err.resendIn) {
@@ -234,6 +248,7 @@ exports.createRestaurant = asyncHandler(async (req, res) => {
     adminName,
     adminEmail,
     adminPhone,
+    otpCode,
     status = 'active',
   } = req.body
 
@@ -260,6 +275,8 @@ exports.createRestaurant = asyncHandler(async (req, res) => {
     email: adminEmail,
     phone: adminPhone,
   })
+
+  await assertProvisionPhoneVerified(provision.phone, otpCode)
 
   const restaurant = await Restaurant.create({
     name: trimmedName,
@@ -302,8 +319,10 @@ exports.createRestaurantAdmin = asyncHandler(async (req, res) => {
     throw new Error('Restaurant not found')
   }
 
-  const { name, email, phone } = req.body
+  const { name, email, phone, otpCode } = req.body
   const provision = resolvePlatformProvision({ email, phone })
+
+  await assertProvisionPhoneVerified(provision.phone, otpCode)
 
   const { user: adminUser, membership } = await assignRestaurantAdmin({
     restaurantId: restaurant._id,
@@ -340,7 +359,7 @@ exports.getRestaurantAdmins = asyncHandler(async (req, res) => {
     .populate('user', 'name email phone isActive lastLogin')
     .sort({ createdAt: -1 })
 
-  res.json({ success: true, admins })
+  res.json({ success: true, admins: admins.filter((m) => m.user) })
 })
 
 exports.getRestaurantStaff = asyncHandler(async (req, res) => {
@@ -359,7 +378,7 @@ exports.getRestaurantStaff = asyncHandler(async (req, res) => {
     .populate('user', 'name email phone isActive lastLogin')
     .sort({ createdAt: -1 })
 
-  res.json({ success: true, staff })
+  res.json({ success: true, staff: staff.filter((m) => m.user) })
 })
 
 exports.createRestaurantStaff = asyncHandler(async (req, res) => {
@@ -369,8 +388,10 @@ exports.createRestaurantStaff = asyncHandler(async (req, res) => {
     throw new Error('Restaurant not found')
   }
 
-  const { name, email, phone, role, customRoleName } = req.body
+  const { name, email, phone, otpCode, role, customRoleName } = req.body
   const provision = resolvePlatformProvision({ email, phone })
+
+  await assertProvisionPhoneVerified(provision.phone, otpCode)
 
   const { user: staffUser, membership } = await assignRestaurantStaff({
     restaurantId: restaurant._id,
@@ -617,7 +638,7 @@ exports.getPlatformUsers = asyncHandler(async (req, res) => {
     const stats = orderStats.get(key) || {}
     return {
       membershipId: m._id,
-      role: m.user.platformRole || mapMembershipRoleLabel(m.role),
+      role: mapMembershipRoleLabel(m.role),
       dbRole: m.role,
       joinedAt: m.createdAt,
       restaurant: m.restaurant,

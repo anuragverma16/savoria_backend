@@ -4,7 +4,7 @@ const Membership = require('../models/Membership')
 const Restaurant = require('../models/Restaurant')
 const { normalizePhone, phoneLookupVariants } = require('./phoneUtils')
 const { PROVISION } = require('./provisionAccess')
-const { setUserPlatformRole, syncUserPlatformRoleFromMemberships } = require('./userPlatformRole')
+const { syncUserPlatformRoleFromMemberships } = require('./userPlatformRole')
 
 const slugify = (text) => text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
 
@@ -55,8 +55,6 @@ async function findOrCreatePhoneCustomer(phoneInput, profile = {}) {
     if (!user.phone) user.phone = phone
     user.lastLogin = new Date()
     await user.save()
-    await syncUserPlatformRoleFromMemberships(user._id)
-    user = await User.findById(user._id)
   }
 
   let membership = null
@@ -84,12 +82,12 @@ async function findOrCreatePhoneCustomer(phoneInput, profile = {}) {
       })
       await membership.populate('restaurant')
     }
-    await syncUserPlatformRoleFromMemberships(user._id)
-    user = await User.findById(user._id)
   } else {
     membership = await Membership.findOne({ user: user._id, isActive: true })
       .populate('restaurant', 'name slug status subscription settings createdBy')
   }
+
+  user = await syncUserPlatformRoleFromMemberships(user._id)
 
   return { user, membership }
 }
@@ -104,7 +102,7 @@ async function findPhoneCustomerForLogin(phoneInput) {
 
   const user = await User.findOne({ phone: { $in: phoneLookupVariants(phoneInput) } })
   if (!user) {
-    const err = new Error('This number is not registered. Please sign up first.')
+    const err = new Error('This mobile number is not registered. Please sign up first.')
     err.statusCode = 404
     throw err
   }
@@ -121,7 +119,9 @@ async function findPhoneCustomerForLogin(phoneInput) {
   const membership = await Membership.findOne({ user: user._id, isActive: true })
     .populate('restaurant', 'name slug status subscription settings createdBy')
 
-  return { user, membership }
+  const synced = await syncUserPlatformRoleFromMemberships(user._id)
+
+  return { user: synced || user, membership }
 }
 
 const { canAccessAsAdmin, canAccessAsStaff } = require('./provisionAccess')
@@ -136,7 +136,7 @@ async function findPhonePanelUserForLogin(phoneInput, loginRole) {
 
   const user = await User.findOne({ phone: { $in: phoneLookupVariants(phoneInput) } })
   if (!user) {
-    const err = new Error('This number is not registered. Ask your super admin to add you.')
+    const err = new Error('This mobile number is not registered. Ask your super admin to add you from the platform panel.')
     err.statusCode = 404
     throw err
   }
@@ -154,14 +154,14 @@ async function findPhonePanelUserForLogin(phoneInput, loginRole) {
   if (loginRole === 'admin') {
     membership = memberships.find((m) => canAccessAsAdmin(m))
     if (!membership) {
-      const err = new Error('No admin access for this number. Contact your super admin.')
+      const err = new Error('No admin access for this number. Ask your super admin to add you from the platform panel.')
       err.statusCode = 403
       throw err
     }
   } else if (loginRole === 'staff') {
     membership = memberships.find((m) => canAccessAsStaff(m))
     if (!membership) {
-      const err = new Error('No staff access for this number. Contact your super admin.')
+      const err = new Error('No staff access for this number. Ask your super admin to add you from the platform panel.')
       err.statusCode = 403
       throw err
     }
@@ -169,9 +169,10 @@ async function findPhonePanelUserForLogin(phoneInput, loginRole) {
 
   user.lastLogin = new Date()
   await user.save({ validateBeforeSave: false })
-  await setUserPlatformRole(user, loginRole === 'admin' ? 'admin' : 'staff')
 
-  return { user, membership }
+  const synced = await syncUserPlatformRoleFromMemberships(user._id)
+
+  return { user: synced || user, membership }
 }
 
 module.exports = { findOrCreatePhoneCustomer, findPhoneCustomerForLogin, findPhonePanelUserForLogin }
