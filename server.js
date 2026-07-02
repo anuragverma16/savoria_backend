@@ -58,42 +58,102 @@ connectDB().then(async () => {
 const app = express()
 const server = http.createServer(app)
 
+// =======================
+// Allowed Origins
+// =======================
+
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "https://savoria-app-frontend-ekzd.vercel.app",
+  process.env.CLIENT_URL,
+].filter(Boolean)
+
+// =======================
+// Socket.io
+// =======================
+
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:3000',
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    origin(origin, callback) {
+      if (!origin) return callback(null, true)
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true)
+      }
+
+      console.log("Socket Blocked Origin:", origin)
+      callback(new Error("Not allowed by CORS"))
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    credentials: true,
   },
 })
 
-app.set('io', io)
+app.set("io", io)
 
-io.on('connection', (socket) => {
-  socket.on('join-restaurant', (restaurantId) => {
+io.on("connection", (socket) => {
+  socket.on("join-restaurant", (restaurantId) => {
     socket.join(`restaurant_${restaurantId}`)
     socket.join(`restaurant_${restaurantId}_kitchen`)
   })
 
-  socket.on('join-kitchen', (restaurantId) => {
+  socket.on("join-kitchen", (restaurantId) => {
     socket.join(`restaurant_${restaurantId}_kitchen`)
   })
 
-  socket.on('join-table', (tableId) => {
+  socket.on("join-table", (tableId) => {
     socket.join(`table_${tableId}`)
   })
 
-  socket.on('disconnect', () => {})
+  socket.on("disconnect", () => {})
 })
 
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }))
-const allowedOrigins = [
-  'http://localhost:3000',
-  process.env.CLIENT_URL,
-];
+// =======================
+// Security
+// =======================
 
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true,
-}));app.use(express.json({ limit: '10mb' }))
+app.use(
+  helmet({
+    crossOriginResourcePolicy: {
+      policy: "cross-origin",
+    },
+  })
+)
+
+// =======================
+// CORS
+// =======================
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true)
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true)
+      }
+
+      console.log("Blocked Origin:", origin)
+
+      callback(new Error("Not allowed by CORS"))
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Restaurant-Id",
+      "Idempotency-Key",
+    ],
+  })
+)
+
+// Handle browser preflight requests
+app.options("*", cors())
+
+app.use(express.json({ limit: "10mb" }))
+app.use(express.urlencoded({ extended: true }))
 app.use(express.urlencoded({ extended: true }))
 
 if (process.env.NODE_ENV === 'development') app.use(morgan('dev'))
