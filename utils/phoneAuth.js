@@ -22,6 +22,26 @@ async function findRestaurant(input) {
   })
 }
 
+async function ensureCustomerMembership(userId, restaurant) {
+  if (!userId || !restaurant?._id) return null
+  let membership = await Membership.findOne({
+    user: userId,
+    restaurant: restaurant._id,
+    isActive: true,
+  }).populate('restaurant', 'name slug status subscription settings createdBy')
+
+  if (!membership) {
+    membership = await Membership.create({
+      user: userId,
+      restaurant: restaurant._id,
+      role: 'customer',
+      provisionedBy: PROVISION.SELF,
+    })
+    await membership.populate('restaurant', 'name slug status subscription settings createdBy')
+  }
+  return membership
+}
+
 async function findOrCreatePhoneCustomer(phoneInput, profile = {}) {
   const phone = normalizePhone(phoneInput)
   if (!phone) {
@@ -33,6 +53,7 @@ async function findOrCreatePhoneCustomer(phoneInput, profile = {}) {
   const name = String(profile.name || '').trim()
   const email = String(profile.email || '').trim().toLowerCase()
   const restaurantName = String(profile.restaurantName || '').trim()
+  const restaurantId = String(profile.restaurantId || '').trim()
   const digits = phone.replace(/\D/g, '')
 
   let user = await User.findOne({ phone: { $in: phoneLookupVariants(phoneInput) } })
@@ -58,30 +79,24 @@ async function findOrCreatePhoneCustomer(phoneInput, profile = {}) {
   }
 
   let membership = null
+  let restaurant = null
 
-  if (restaurantName) {
-    const restaurant = await findRestaurant(restaurantName)
+  if (restaurantId && restaurantId.match(/^[a-f0-9]{24}$/i)) {
+    restaurant = await Restaurant.findOne({ _id: restaurantId, status: { $in: ['active', 'pending'] } })
+    if (!restaurant) {
+      const err = new Error('Restaurant not found for this QR session.')
+      err.statusCode = 404
+      throw err
+    }
+    membership = await ensureCustomerMembership(user._id, restaurant)
+  } else if (restaurantName) {
+    restaurant = await findRestaurant(restaurantName)
     if (!restaurant) {
       const err = new Error('Restaurant not found. Enter the restaurant name you dine at.')
       err.statusCode = 404
       throw err
     }
-
-    membership = await Membership.findOne({
-      user: user._id,
-      restaurant: restaurant._id,
-      isActive: true,
-    }).populate('restaurant')
-
-    if (!membership) {
-      membership = await Membership.create({
-        user: user._id,
-        restaurant: restaurant._id,
-        role: 'customer',
-        provisionedBy: PROVISION.SELF,
-      })
-      await membership.populate('restaurant')
-    }
+    membership = await ensureCustomerMembership(user._id, restaurant)
   } else {
     membership = await Membership.findOne({ user: user._id, isActive: true })
       .populate('restaurant', 'name slug status subscription settings createdBy')
@@ -92,7 +107,7 @@ async function findOrCreatePhoneCustomer(phoneInput, profile = {}) {
   return { user, membership }
 }
 
-async function findPhoneCustomerForLogin(phoneInput) {
+async function findPhoneCustomerForLogin(phoneInput, profile = {}) {
   const phone = normalizePhone(phoneInput)
   if (!phone) {
     const err = new Error('Invalid phone number')
@@ -116,8 +131,20 @@ async function findPhoneCustomerForLogin(phoneInput) {
   user.lastLogin = new Date()
   await user.save({ validateBeforeSave: false })
 
-  const membership = await Membership.findOne({ user: user._id, isActive: true })
-    .populate('restaurant', 'name slug status subscription settings createdBy')
+  const restaurantId = String(profile.restaurantId || '').trim()
+  let membership = null
+
+  if (restaurantId && restaurantId.match(/^[a-f0-9]{24}$/i)) {
+    const restaurant = await Restaurant.findOne({ _id: restaurantId, status: { $in: ['active', 'pending'] } })
+    if (restaurant) {
+      membership = await ensureCustomerMembership(user._id, restaurant)
+    }
+  }
+
+  if (!membership) {
+    membership = await Membership.findOne({ user: user._id, isActive: true })
+      .populate('restaurant', 'name slug status subscription settings createdBy')
+  }
 
   const synced = await syncUserPlatformRoleFromMemberships(user._id)
 

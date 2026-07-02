@@ -13,14 +13,14 @@ async function sendWhatsAppOtp(phone, code) {
     return await sendOtpWhatsApp(phone, code)
   } catch (err) {
     const canSmsFallback = process.env.TWILIO_PHONE_NUMBER
-      && /channel|63007|whatsapp/i.test(String(err.message))
+      && /channel|63007|whatsapp|could not deliver|delivery failed|sandbox/i.test(String(err.message))
     if (!canSmsFallback) throw err
 
     const smsResult = await sendViaTwilio(phone, OTP_MESSAGE(code))
     if (!smsResult) throw err
 
     if (process.env.NODE_ENV === 'development') {
-      console.warn('[WhatsApp OTP] WhatsApp channel unavailable — sent via Twilio SMS instead')
+      console.warn('[WhatsApp OTP] WhatsApp unavailable — sent via Twilio SMS instead')
     }
     return { ...smsResult, fallback: 'sms' }
   }
@@ -95,6 +95,7 @@ async function sendOtp(phoneInput, options = {}) {
     maskedPhone: maskPhone(phone),
     resendIn: Math.ceil(RESEND_COOLDOWN_MS / 1000),
     expiresIn: Math.ceil(OTP_TTL_MS / 1000),
+    ...(sendResult?.fallback === 'sms' && { deliveredVia: 'sms' }),
     ...(sendResult?.to && { deliveredTo: maskPhone(phone) }),
   }
 }

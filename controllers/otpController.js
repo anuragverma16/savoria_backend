@@ -4,8 +4,10 @@ const { sendOtp, verifyOtp } = require('../utils/otpService')
 const { sendEmailOtp, verifyEmailOtp, normalizeEmail } = require('../utils/emailOtpService')
 const { findOrCreatePhoneCustomer, findPhoneCustomerForLogin, findPhonePanelUserForLogin } = require('../utils/phoneAuth')
 const { canAccessAsAdmin, canAccessAsStaff } = require('../utils/provisionAccess')
-const { normalizePhone, findUserByPhone } = require('../utils/phoneUtils')
+const { normalizePhone, findUserByPhone, maskPhone } = require('../utils/phoneUtils')
 const { isSuperAdminPhone, ensureSuperAdminPhoneUser } = require('../utils/superAdminPhone')
+const { assertProvisionPhone } = require('../utils/provisionUserValidation')
+const { issueProvisionToken } = require('../utils/provisionOtpToken')
 const {
   generateAccessToken,
   generateRefreshToken,
@@ -180,6 +182,12 @@ exports.sendWhatsappOtp = asyncHandler(async (req, res) => {
     if (exists) {
       throw authError('This mobile number is already registered. Please log in instead.', 400)
     }
+  } else if (purpose === 'provision') {
+    try {
+      assertProvisionPhone(normalizedPhone)
+    } catch (err) {
+      throw authError(err.message, err.statusCode || 400)
+    }
   }
 
   try {
@@ -191,7 +199,9 @@ exports.sendWhatsappOtp = asyncHandler(async (req, res) => {
 })
 
 exports.verifyWhatsappOtp = asyncHandler(async (req, res) => {
-  const { phone, code, name, restaurantName, email, purpose = 'login', loginRole } = req.body
+  const {
+    phone, code, name, restaurantName, restaurantId, email, purpose = 'login', loginRole,
+  } = req.body
   if (!phone || !code) {
     res.status(400)
     throw new Error('Phone number and OTP are required')
@@ -205,6 +215,16 @@ exports.verifyWhatsappOtp = asyncHandler(async (req, res) => {
 
   await verifyOtp(normalizedPhone, code, { name, restaurantName, email }, { channel: 'whatsapp' })
 
+  if (purpose === 'provision') {
+    assertProvisionPhone(normalizedPhone)
+    const provisionToken = issueProvisionToken(normalizedPhone)
+    return res.json({
+      success: true,
+      provisionToken,
+      maskedPhone: maskPhone(normalizedPhone),
+    })
+  }
+
   if (purpose === 'signup') {
     if (isSuperAdminPhone(normalizedPhone)) {
       throw authError('This number is reserved for platform admin. Please log in instead.', 400)
@@ -213,7 +233,9 @@ exports.verifyWhatsappOtp = asyncHandler(async (req, res) => {
     if (exists) {
       throw authError('This mobile number is already registered. Please log in instead.', 400)
     }
-    const { user, membership } = await findOrCreatePhoneCustomer(normalizedPhone, { name, restaurantName, email })
+    const { user, membership } = await findOrCreatePhoneCustomer(normalizedPhone, {
+      name, restaurantName, restaurantId, email,
+    })
     await buildWhatsappAuthResponse(user, membership, res, 201)
     return
   }
@@ -226,7 +248,7 @@ exports.verifyWhatsappOtp = asyncHandler(async (req, res) => {
   } else if (loginRole === 'admin' || loginRole === 'staff') {
     ({ user, membership } = await findPhonePanelUserForLogin(normalizedPhone, loginRole))
   } else {
-    ({ user, membership } = await findPhoneCustomerForLogin(normalizedPhone))
+    ({ user, membership } = await findPhoneCustomerForLogin(normalizedPhone, { restaurantId }))
   }
   const resolvedRole = isSuperAdminPhone(normalizedPhone)
     ? 'superadmin'

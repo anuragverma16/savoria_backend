@@ -154,6 +154,66 @@ exports.getMe = asyncHandler(async (req, res) => {
   })
 })
 
+exports.updateProfile = asyncHandler(async (req, res) => {
+  const { name, email } = req.body
+  const user = await User.findById(req.user._id)
+  if (!user) {
+    res.status(404)
+    throw new Error('User not found')
+  }
+
+  if (name !== undefined) {
+    const trimmed = String(name).trim()
+    if (!trimmed) {
+      res.status(400)
+      throw new Error('Name is required')
+    }
+    user.name = trimmed
+  }
+
+  if (email !== undefined) {
+    const normalized = String(email).trim().toLowerCase()
+    if (!normalized || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+      res.status(400)
+      throw new Error('Enter a valid email address')
+    }
+    const taken = await User.findOne({ email: normalized, _id: { $ne: user._id } })
+    if (taken) {
+      res.status(400)
+      throw new Error('This email is already registered to another account')
+    }
+    user.email = normalized
+  }
+
+  await user.save()
+
+  let activeUser = user
+  if (user.platformRole !== 'superadmin' && !isSuperAdminPhone(user.phone)) {
+    activeUser = await syncUserPlatformRoleFromMemberships(user._id) || user
+  }
+
+  const memberships = await Membership.find({ user: user._id, isActive: true })
+    .populate('restaurant', 'name slug status subscription settings createdBy')
+
+  const superAdmin = activeUser.platformRole === 'superadmin' || isSuperAdminPhone(activeUser.phone)
+  const membership = req.membership
+    || memberships.find((m) => m.isActive !== false)
+    || null
+
+  const { password, ...safeUser } = activeUser.toObject()
+  res.json({
+    success: true,
+    user: {
+      ...safeUser,
+      role: superAdmin ? 'superadmin' : mapMembershipToClientRole(activeUser, membership),
+      platformRole: superAdmin ? 'superadmin' : activeUser.platformRole,
+      avatar: activeUser.initials || safeUser.avatar,
+      permissions: membership?.permissions || [],
+    },
+    memberships,
+  })
+})
+
 exports.logout = asyncHandler(async (req, res) => {
   const { refreshToken } = req.body
   if (refreshToken) await revokeRefreshToken(refreshToken)

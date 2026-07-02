@@ -8,12 +8,14 @@ const Table = require('../models/Table')
 const MenuItem = require('../models/MenuItem')
 const { myRestaurantQuery } = require('../utils/platformOwnership')
 const { assignRestaurantAdmin } = require('../utils/assignRestaurantAdmin')
-const { assignRestaurantStaff } = require('../utils/assignRestaurantStaff')
+const { assignRestaurantStaff, assertCanAssignRestaurantStaff } = require('../utils/assignRestaurantStaff')
 const { PROVISION } = require('../utils/provisionAccess')
 const { sendEmailOtp, normalizeEmail } = require('../utils/emailOtpService')
 const { resolvePlatformProvision } = require('../utils/provisionCredentials')
 const { sendOtp, verifyOtp } = require('../utils/otpService')
-const { assertProvisionPhone } = require('../utils/provisionUserValidation')
+const { assertProvisionPhone, previewProvisionUser } = require('../utils/provisionUserValidation')
+const { issueProvisionToken, assertProvisionToken } = require('../utils/provisionOtpToken')
+const { maskPhone, findUserByPhone } = require('../utils/phoneUtils')
 const { read: readIdempotent, write: writeIdempotent, idempotencyKey } = require('../utils/idempotency')
 const { aggregateRestaurantUserCounts, deactivateOrphanMemberships, EMPTY_COUNTS } = require('../utils/restaurantUserCounts')
 const LoginHistory = require('../models/LoginHistory')
@@ -30,6 +32,14 @@ async function assertProvisionPhoneVerified(phone, otpCode) {
     throw err
   }
   await verifyOtp(phone, code, {}, { channel: 'whatsapp' })
+}
+
+async function assertProvisionVerified(phone, { otpCode, provisionToken } = {}) {
+  if (provisionToken) {
+    assertProvisionToken(phone, provisionToken)
+    return
+  }
+  await assertProvisionPhoneVerified(phone, otpCode)
 }
 
 const slugify = (text) => text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
@@ -214,10 +224,10 @@ exports.sendProvisionEmailOtp = asyncHandler(async (req, res) => {
 
 exports.sendProvisionWhatsAppOtp = asyncHandler(async (req, res) => {
   const { phone } = req.body
-  assertProvisionPhone(phone)
+  const normalized = assertProvisionPhone(phone)
 
   try {
-    const result = await sendOtp(phone, { channel: 'whatsapp' })
+    const result = await sendOtp(normalized, { channel: 'whatsapp' })
     res.json({ success: true, ...result })
   } catch (err) {
     if (err.statusCode === 429 && err.resendIn) {
@@ -230,6 +240,24 @@ exports.sendProvisionWhatsAppOtp = asyncHandler(async (req, res) => {
     if (err.statusCode) res.status(err.statusCode)
     throw err
   }
+})
+
+exports.verifyProvisionWhatsAppOtp = asyncHandler(async (req, res) => {
+  const { phone, code } = req.body
+  const normalized = assertProvisionPhone(phone)
+  const otpCode = String(code || '').trim()
+  if (!/^\d{6}$/.test(otpCode)) {
+    res.status(400)
+    throw new Error('Enter the 6-digit WhatsApp verification code')
+  }
+
+  await verifyOtp(normalized, otpCode, {}, { channel: 'whatsapp' })
+  const provisionToken = issueProvisionToken(normalized)
+  res.json({
+    success: true,
+    provisionToken,
+    maskedPhone: maskPhone(normalized),
+  })
 })
 
 exports.createRestaurant = asyncHandler(async (req, res) => {
@@ -249,6 +277,7 @@ exports.createRestaurant = asyncHandler(async (req, res) => {
     adminEmail,
     adminPhone,
     otpCode,
+    provisionToken,
     status = 'active',
   } = req.body
 
@@ -276,7 +305,7 @@ exports.createRestaurant = asyncHandler(async (req, res) => {
     phone: adminPhone,
   })
 
-  await assertProvisionPhoneVerified(provision.phone, otpCode)
+  await assertProvisionVerified(provision.phone, { otpCode, provisionToken })
 
   const restaurant = await Restaurant.create({
     name: trimmedName,
@@ -319,10 +348,10 @@ exports.createRestaurantAdmin = asyncHandler(async (req, res) => {
     throw new Error('Restaurant not found')
   }
 
-  const { name, email, phone, otpCode } = req.body
+  const { name, email, phone, otpCode, provisionToken } = req.body
   const provision = resolvePlatformProvision({ email, phone })
 
-  await assertProvisionPhoneVerified(provision.phone, otpCode)
+  await assertProvisionVerified(provision.phone, { otpCode, provisionToken })
 
   const { user: adminUser, membership } = await assignRestaurantAdmin({
     restaurantId: restaurant._id,
@@ -381,6 +410,54 @@ exports.getRestaurantStaff = asyncHandler(async (req, res) => {
   res.json({ success: true, staff: staff.filter((m) => m.user) })
 })
 
+exports.precheckRestaurantProvision = asyncHandler(async (req, res) => {
+  const restaurant = await Restaurant.findOne({ _id: req.params.id, createdBy: req.user._id })
+  if (!restaurant) {
+    res.status(404)
+    throw new Error('Restaurant not found')
+  }
+
+  const { name, email, phone, role = 'staff' } = req.body
+  const provision = resolvePlatformProvision({ email, phone })
+
+  if (role === 'staff') {
+    await assertCanAssignRestaurantStaff({
+      restaurantId: restaurant._id,
+      name,
+      email: provision.email,
+      phone: provision.phone,
+      role: 'staff',
+    })
+  } else if (role === 'admin') {
+    await previewProvisionUser({
+      email: provision.email,
+      phone: provision.phone,
+      platformRole: 'admin',
+    })
+
+    const user = await User.findOne({ email: provision.email })
+      || await findUserByPhone(provision.phone, User)
+
+    if (user) {
+      const existingMembership = await Membership.findOne({
+        user: user._id,
+        restaurant: restaurant._id,
+        isActive: true,
+        role: 'restaurant_admin',
+      })
+      if (existingMembership) {
+        res.status(400)
+        throw new Error('This person is already an admin for this restaurant')
+      }
+    }
+  } else {
+    res.status(400)
+    throw new Error('Invalid provision role')
+  }
+
+  res.json({ success: true })
+})
+
 exports.createRestaurantStaff = asyncHandler(async (req, res) => {
   const restaurant = await Restaurant.findOne({ _id: req.params.id, createdBy: req.user._id })
   if (!restaurant) {
@@ -388,10 +465,10 @@ exports.createRestaurantStaff = asyncHandler(async (req, res) => {
     throw new Error('Restaurant not found')
   }
 
-  const { name, email, phone, otpCode, role, customRoleName } = req.body
+  const { name, email, phone, otpCode, provisionToken, role, customRoleName } = req.body
   const provision = resolvePlatformProvision({ email, phone })
 
-  await assertProvisionPhoneVerified(provision.phone, otpCode)
+  await assertProvisionVerified(provision.phone, { otpCode, provisionToken })
 
   const { user: staffUser, membership } = await assignRestaurantStaff({
     restaurantId: restaurant._id,

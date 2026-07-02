@@ -45,6 +45,33 @@ async function createMessage(client, { from, to, code, config, useTemplate }) {
   return client.messages.create({ from, to, body: OTP_MESSAGE(code) })
 }
 
+async function assertMessageDelivered(client, messageSid, usedFrom) {
+  await sleep(1500)
+  try {
+    const status = await client.messages(messageSid).fetch()
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[WhatsApp OTP] status=${status.status} sid=${messageSid}`)
+    }
+    if (['failed', 'undelivered', 'canceled'].includes(status.status)) {
+      const err = new Error(
+        isSandboxFrom(usedFrom)
+          ? 'WhatsApp could not deliver the code. On that phone, open WhatsApp and send join <code> to +1 415 523 8886, then tap Resend.'
+          : `WhatsApp delivery failed (${status.status}). Please try again.`,
+      )
+      err.statusCode = 502
+      err.deliveryStatus = status.status
+      throw err
+    }
+    return status
+  } catch (err) {
+    if (err.statusCode === 502) throw err
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[WhatsApp OTP] Could not confirm delivery status:', err.message)
+    }
+    return null
+  }
+}
+
 async function sendFromNumber(client, config, from, to, code) {
   const sandbox = isSandboxFrom(from)
   const useTemplate = !sandbox && config.useContentTemplate !== false && Boolean(config.contentSid)
@@ -91,15 +118,12 @@ async function sendOtpWhatsApp(phone, code) {
 
       const { message, provider, from: usedFrom } = await sendFromNumber(client, twilioConfig, from, to, code)
 
+      await assertMessageDelivered(client, message.sid, usedFrom)
+
       if (process.env.NODE_ENV === 'development') {
-        await sleep(1500)
-        try {
-          const status = await client.messages(message.sid).fetch()
-          console.log(`[WhatsApp OTP] status=${status.status} sid=${message.sid}`)
-        } catch { /* ignore */ }
         console.log(`[WhatsApp OTP] DEV code for ${maskPhone(phone)}: ${code}`)
         if (isSandboxFrom(usedFrom)) {
-          console.warn('   Sandbox: on WhatsApp send join <code> to +1 415 523 8886 from the user phone if message is missing')
+          console.warn('   Sandbox: recipient must join +1 415 523 8886 on WhatsApp if message is missing')
         }
         if (usedFrom !== primaryFrom) {
           console.warn(`   Note: ${primaryFrom} is not WhatsApp-active — used sandbox ${usedFrom}`)
@@ -112,12 +136,14 @@ async function sendOtpWhatsApp(phone, code) {
       if (process.env.NODE_ENV === 'development') {
         console.warn(`[WhatsApp OTP] Failed from ${from}:`, err.code, err.message)
       }
+      if (err.deliveryStatus || err.statusCode === 502) break
       if (!isChannelError(err)) break
     }
   }
 
-  if (process.env.NODE_ENV === 'development') {
-    console.warn(`[WhatsApp OTP] DEV code for ${maskPhone(phone)}: ${code}`)
+  if (lastErr) {
+    if (!lastErr.statusCode) lastErr.statusCode = 502
+    throw lastErr
   }
 
   const usedSandbox = fromCandidates.some(isSandboxFrom)

@@ -1,7 +1,50 @@
 const Membership = require('../models/Membership')
 const { STAFF_ROLES, PROVISION } = require('./provisionAccess')
 const { syncUserPlatformRoleFromMemberships } = require('./userPlatformRole')
-const { resolveProvisionUser } = require('./provisionUserValidation')
+const { resolveProvisionUser, previewProvisionUser } = require('./provisionUserValidation')
+
+async function assertCanAssignRestaurantStaff({
+  restaurantId,
+  name,
+  email,
+  phone,
+  role: staffRole = 'staff',
+  customRoleName = '',
+}) {
+  if (!name?.trim() || !email?.trim()) {
+    const err = new Error('Staff name and email are required')
+    err.statusCode = 400
+    throw err
+  }
+
+  if (!STAFF_ROLES.includes(staffRole)) {
+    const err = new Error('Invalid staff role')
+    err.statusCode = 400
+    throw err
+  }
+
+  const user = await previewProvisionUser({ email, phone, platformRole: 'staff' })
+
+  if (!user) return null
+
+  const existingMembership = await Membership.findOne({ user: user._id, restaurant: restaurantId })
+
+  if (existingMembership?.isActive && existingMembership.role === 'restaurant_admin') {
+    const err = new Error(
+      `This mobile belongs to the restaurant admin (${user.name || user.email}). Staff must use a different person's mobile number.`,
+    )
+    err.statusCode = 400
+    throw err
+  }
+
+  if (existingMembership?.isActive && STAFF_ROLES.includes(existingMembership.role)) {
+    const err = new Error('This person is already staff for this restaurant')
+    err.statusCode = 400
+    throw err
+  }
+
+  return user
+}
 
 async function assignRestaurantStaff({
   restaurantId,
@@ -24,6 +67,15 @@ async function assignRestaurantStaff({
     throw err
   }
 
+  await assertCanAssignRestaurantStaff({
+    restaurantId,
+    name,
+    email,
+    phone,
+    role: staffRole,
+    customRoleName,
+  })
+
   const user = await resolveProvisionUser({
     email,
     phone,
@@ -35,7 +87,9 @@ async function assignRestaurantStaff({
   const existingMembership = await Membership.findOne({ user: user._id, restaurant: restaurantId })
 
   if (existingMembership?.isActive && existingMembership.role === 'restaurant_admin') {
-    const err = new Error('This user is already a restaurant admin')
+    const err = new Error(
+      `This mobile belongs to the restaurant admin (${user.name || user.email}). Staff must use a different person's mobile number.`,
+    )
     err.statusCode = 400
     throw err
   }
@@ -70,4 +124,4 @@ async function assignRestaurantStaff({
   return { user: syncedUser || user, membership }
 }
 
-module.exports = { assignRestaurantStaff }
+module.exports = { assignRestaurantStaff, assertCanAssignRestaurantStaff }
