@@ -153,7 +153,6 @@ app.options("*", cors())
 
 app.use(express.json({ limit: "10mb" }))
 app.use(express.urlencoded({ extended: true }))
-app.use(express.urlencoded({ extended: true }))
 
 if (process.env.NODE_ENV === 'development') app.use(morgan('dev'))
 
