@@ -226,7 +226,17 @@ app.use(errorHandler)
 
 const PORT = process.env.PORT || 5000
 
-const startServer = () => {
+function tryFreePort() {
+  if (process.env.NODE_ENV === 'production') return
+  try {
+    const { execSync } = require('child_process')
+    execSync(`node "${__dirname}/scripts/free-port.js" ${PORT}`, { stdio: 'ignore' })
+  } catch {
+    /* ignore */
+  }
+}
+
+const startServer = (attempt = 0) => {
   server.listen(PORT, async () => {
     console.log(`\n🍽️  DineFlow API → http://localhost:${PORT}\n`)
     logOtpConfig()
@@ -241,6 +251,12 @@ const startServer = () => {
     }
   }).on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
+      if (process.env.NODE_ENV !== 'production' && attempt < 4) {
+        console.warn(`Port ${PORT} in use — freeing and retrying (${attempt + 1}/4)...`)
+        tryFreePort()
+        setTimeout(() => startServer(attempt + 1), 600 * (attempt + 1))
+        return
+      }
       console.error(`\n❌ Port ${PORT} is already in use. Run: npm run dev\n`)
     } else {
       console.error('Server error:', err.message)
@@ -249,17 +265,25 @@ const startServer = () => {
   })
 }
 
-const shutdown = () => {
+const shutdown = (signal) => {
+  console.log(`\n${signal} received — shutting down gracefully`)
   server.close(() => {
     mongoose.connection.close(false).finally(() => process.exit(0))
   })
-  setTimeout(() => process.exit(1), 3000).unref()
+  setTimeout(() => process.exit(0), 5000).unref()
 }
 
-process.on('SIGTERM', shutdown)
-process.on('SIGINT', shutdown)
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 process.once('SIGUSR2', () => {
   server.close(() => process.kill(process.pid, 'SIGUSR2'))
+})
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err)
 })
 
 startServer()

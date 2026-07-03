@@ -1,6 +1,9 @@
 {
-  "delay": 3000,
+  "delay": 1500,
   "signal": "SIGTERM",
+  "events": {
+    "restart": "node scripts/free-port.js 5000"
+  },
   "watch": ["server.js", "routes", "controllers", "models", "middleware", "config", "utils"],
   "ignore": ["scripts/**", "node_modules/**", ".env", ".env.example", "nodemon.json"]
 }
