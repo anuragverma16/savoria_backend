@@ -1,4 +1,4 @@
-const { logOtpConfig } = require('./config/env')
+const { logOtpConfig, logQrConfig } = require('./config/env')
 const { setTwilioWhatsAppConfig } = require('./utils/twilioWhatsApp')
 const { setEmailOtpConfig } = require('./utils/emailConfig')
 const { verifyMailConnection } = require('./config/mail')
@@ -66,7 +66,30 @@ const allowedOrigins = [
   "http://localhost:5173",
   "https://savoria-app-frontend-ekzd.vercel.app",
   process.env.CLIENT_URL,
+  process.env.PUBLIC_APP_URL,
+  process.env.FRONTEND_URL,
 ].filter(Boolean)
+
+function pushOrigin(url) {
+  if (!url || typeof url !== 'string') return
+  try {
+    const origin = new URL(url.replace(/\/$/, '')).origin
+    if (!allowedOrigins.includes(origin)) allowedOrigins.push(origin)
+  } catch {
+    /* ignore invalid URL */
+  }
+}
+
+;[process.env.CLIENT_URL, process.env.PUBLIC_APP_URL, process.env.FRONTEND_URL].forEach(pushOrigin)
+
+// Same-WiFi dev: allow http://192.168.x.x:3000 when PUBLIC_APP_URL uses LAN IP
+try {
+  const { getSuggestedLanBaseUrl } = require('./utils/tableQr')
+  const lan = getSuggestedLanBaseUrl()
+  if (lan) pushOrigin(lan)
+} catch {
+  /* optional */
+}
 
 // =======================
 // Socket.io
@@ -207,6 +230,7 @@ const startServer = () => {
   server.listen(PORT, async () => {
     console.log(`\n🍽️  DineFlow API → http://localhost:${PORT}\n`)
     logOtpConfig()
+    logQrConfig()
     const mail = await verifyMailConnection()
     if (mail.ok) {
       console.log('📧 Email OTP: Gmail SMTP ready — codes will be sent to user inbox\n')

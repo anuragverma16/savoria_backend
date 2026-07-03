@@ -54,4 +54,20 @@ function logOtpConfig() {
   }
 }
 
-module.exports = { logOtpConfig, getOtpProviders }
+function logQrConfig() {
+  const { qrBaseUrl, qrUsesLocalhost, suggestedLanUrl } = require('../utils/tableQr').getQrConfigMeta()
+  if (!qrUsesLocalhost) {
+    console.log(`📱 Table QR base URL: ${qrBaseUrl}`)
+    return
+  }
+  console.warn('⚠️  Table QR codes use localhost — phones cannot open them when scanned.')
+  if (suggestedLanUrl) {
+    console.warn(`   For same-WiFi testing, add to backend/.env:`)
+    console.warn(`   PUBLIC_APP_URL=${suggestedLanUrl}`)
+    console.warn('   Then restart the backend and click "Regenerate all QR" in Admin → Tables.')
+  } else {
+    console.warn('   Set PUBLIC_APP_URL in backend/.env to your deployed site or ngrok URL.')
+  }
+}
+
+module.exports = { logOtpConfig, getOtpProviders, logQrConfig }

@@ -1,7 +1,7 @@
 const asyncHandler = require('express-async-handler')
 const Table = require('../models/Table')
 const Restaurant = require('../models/Restaurant')
-const { generateTableQrDataUrl, ensureTableQrCode, getTableOrderUrl, getClientBaseUrl, isLocalhostUrl } = require('../utils/tableQr')
+const { generateTableQrDataUrl, ensureTableQrCode, getTableOrderUrl, getQrConfigMeta } = require('../utils/tableQr')
 
 exports.getTables = asyncHandler(async (req, res) => {
   const restaurantId = req.restaurant?._id || req.params.restaurantId
@@ -24,8 +24,7 @@ exports.getTables = asyncHandler(async (req, res) => {
   res.json({
     success: true,
     tables,
-    qrBaseUrl: getClientBaseUrl(),
-    qrUsesLocalhost: isLocalhostUrl(getClientBaseUrl()),
+    ...getQrConfigMeta(),
   })
 })
 
